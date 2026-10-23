@@ -1,0 +1,21 @@
+IMG2BLEND
+=========
+1. Coloca UNA imagen en cada carpeta:
+     front/  -> vista frontal
+     left/   -> vista izquierda
+     back/   -> vista trasera
+     right/  -> vista derecha
+   (minimo obligatorio: front. Cuantas mas vistas, mejor.)
+   Consejo: mismo encuadre y distancia, fondo liso.
+
+2. Instala los requisitos (una vez):
+     - Blender (https://www.blender.org)
+     - Python 3.10+ y el repo Hunyuan3D-2 (pip install -e .), requiere GPU NVIDIA
+     - Para fotogrametria (20+ fotos): COLMAP en el PATH
+
+3. Ejecuta desde esta carpeta:
+     python pipeline.py
+   En Windows, si Blender no esta en el PATH:
+     python pipeline.py --blender "C:/Program Files/Blender Foundation/Blender 4.2/blender.exe"
+
+4. El resultado queda en output/modelo.blend

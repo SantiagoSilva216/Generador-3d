@@ -1,0 +1,5 @@
+Coloca aqui la imagen de la vista TRASERA (back).
+Formatos: png, jpg, jpeg, webp.
+Usa UNA imagen por carpeta (si hay varias, se usa la primera por orden alfabetico).
+Si haces fotogrametria (20+ fotos), puedes poner muchas fotos en cualquiera de las 4 carpetas.
+Puedes borrar este archivo.
