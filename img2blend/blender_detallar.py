@@ -1,5 +1,5 @@
 """Se ejecuta al abrir Blender con ventana (lo lanza detallar.py):
-modelo en modo escultura + tus imagenes colocadas como referencia en cada vista."""
+modelo en modo escultura + imagenes de las partes a detallar colocadas junto a el."""
 import math
 import sys
 from pathlib import Path
@@ -9,16 +9,7 @@ from mathutils import Euler, Vector
 
 args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 REF_DIR = Path(args[0]) if args else None
-
-# Rotacion de cada imagen de referencia para que se vea al mirar desde esa vista
-ROT = {
-    "front": (math.pi / 2, 0, 0),
-    "back": (math.pi / 2, 0, math.pi),
-    "left": (math.pi / 2, 0, math.pi / 2),
-    "right": (math.pi / 2, 0, -math.pi / 2),
-    "top": (0, 0, 0),
-    "bottom": (math.pi, 0, 0),
-}
+GAP = 0.1
 
 
 def model_bounds(obj):
@@ -28,44 +19,45 @@ def model_bounds(obj):
     return mn, mx
 
 
+def part_files():
+    return sorted(REF_DIR.glob("*.png")) if REF_DIR and REF_DIR.exists() else []
+
+
 def add_refs(obj):
-    if REF_DIR is None or not REF_DIR.exists():
+    files = part_files()
+    if not files:
         return
     mn, mx = model_bounds(obj)
     d = mx - mn
-    center = (mn + mx) / 2
-    size = {  # (ancho, alto) del modelo visto desde cada vista
-        "front": (d.x, d.z), "back": (d.x, d.z),
-        "left": (d.y, d.z), "right": (d.y, d.z),
-        "top": (d.x, d.y), "bottom": (d.x, d.y),
-    }
-    coll = bpy.data.collections.get("Referencias")
+    cy = (mn.y + mx.y) / 2
+    side = d.z * 0.45
+    coll = bpy.data.collections.get("Detalles")
     if coll is None:
-        coll = bpy.data.collections.new("Referencias")
+        coll = bpy.data.collections.new("Detalles")
         bpy.context.scene.collection.children.link(coll)
-    for name, rot in ROT.items():
-        path = REF_DIR / f"{name}.png"
-        if not path.exists() or bpy.data.objects.get(f"Ref_{name}"):
+    for i, path in enumerate(files):
+        name = f"Detalle_{path.stem}"
+        if bpy.data.objects.get(name):
             continue
+        col, row = i // 2, i % 2  # columnas de 2 imagenes a la derecha del modelo
         try:
             img = bpy.data.images.load(str(path), check_existing=True)
-            aspect = img.size[0] / max(img.size[1], 1)
-            e = bpy.data.objects.new(f"Ref_{name}", None)
+            e = bpy.data.objects.new(name, None)
             e.empty_display_type = "IMAGE"
             e.data = img
             e.empty_image_depth = "BACK"
             e.show_empty_image_perspective = False
             e.show_empty_image_only_axis_aligned = True
-            e.show_empty_image_backside = False
             e.use_empty_image_alpha = True
-            e.color = (1, 1, 1, 0.45)
-            e.empty_display_size = size[name][1] * max(1.0, aspect)
-            e.rotation_euler = rot
-            e.location = center
+            e.show_name = True
+            e.empty_display_size = side
+            e.rotation_euler = (math.pi / 2, 0, 0)
+            e.location = (mx.x + 0.2 + side / 2 + col * (side + GAP), cy,
+                          mx.z - side / 2 - row * (side + GAP))
             e.hide_select = True
             coll.objects.link(e)
         except Exception as ex:
-            print(f"No pude colocar la referencia {name}: {ex}")
+            print(f"No pude colocar la parte {path.stem}: {ex}")
 
 
 def preparar():
@@ -95,14 +87,17 @@ def vista_frontal():
     try:
         obj = bpy.data.objects.get("Modelo")
         mn, mx = model_bounds(obj)
+        side = (mx - mn).z * 0.45
+        ncols = (len(part_files()) + 1) // 2
+        right = mx.x + 0.2 + ncols * (side + GAP)
         win = bpy.context.window or bpy.context.window_manager.windows[0]
         for area in win.screen.areas:
             if area.type == "VIEW_3D":
                 r3d = area.spaces.active.region_3d
                 r3d.view_perspective = "ORTHO"
                 r3d.view_rotation = Euler((math.pi / 2, 0, 0)).to_quaternion()
-                r3d.view_location = (mn + mx) / 2
-                r3d.view_distance = (mx - mn).z * 2.4
+                r3d.view_location = ((mn.x + right) / 2, (mn.y + mx.y) / 2, (mn.z + mx.z) / 2)
+                r3d.view_distance = max((mx - mn).z * 2.4, (right - mn.x) * 1.6)
     except Exception as ex:
         print("No pude ajustar la vista:", ex)
     return None

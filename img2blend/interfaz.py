@@ -4,8 +4,12 @@ img2blend - interfaz (rediseño oscuro)
 Pulsa en un bloque para elegir una imagen; se copia a la carpeta correspondiente
 (front/, left/, back/, right/, top/, bottom/), de donde leen los demas scripts.
 
+Paso 2 (Detallar): el panel de vistas se sustituye por un panel de PARTES a detallar
+(cara, manos, ropa...). Cada parte se guarda en detalles/<nombre>/.
+
 Uso: doble clic en interfaz.bat
 """
+import json
 import os
 import queue
 import re
@@ -15,7 +19,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 
 from PIL import Image, ImageTk
@@ -25,6 +29,9 @@ from pipeline import find_blender
 
 BASE = Path(__file__).resolve().parent
 EXT = {".png", ".jpg", ".jpeg", ".webp"}
+DETAIL_DIR = BASE / "detalles"
+MAX_PARTS = 6
+STRENGTH = {"suave": 0.4, "normal": 0.7, "fuerte": 1.0}   # intensidad del relieve
 SLOTS = [
     ("front", "FRONTAL", "Obligatoria"),
     ("left", "IZQUIERDA", "Opcional"),
@@ -81,7 +88,7 @@ def lerp_color(a, b, t):
 
 
 def first_image(folder: Path):
-    folder.mkdir(exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
     files = sorted(p for p in folder.iterdir() if p.suffix.lower() in EXT)
     return files[0] if files else None
 
@@ -210,7 +217,7 @@ class Slot(tk.Canvas):
         )
         if not path:
             return
-        self.folder.mkdir(exist_ok=True)
+        self.folder.mkdir(parents=True, exist_ok=True)
         for f in self.folder.iterdir():  # una sola imagen por bloque
             if f.suffix.lower() in EXT:
                 f.unlink()
@@ -225,6 +232,116 @@ class Slot(tk.Canvas):
 
     def has_image(self):
         return first_image(self.folder) is not None
+
+
+def read_region(part):
+    """Rectangulo [x0,y0,x1,y1] (0-1, sobre la imagen frontal) guardado para una parte, o None."""
+    try:
+        return json.loads((DETAIL_DIR / part / "region.json").read_text(encoding="utf-8"))["rect"]
+    except Exception:
+        return None
+
+
+class RegionDialog(tk.Toplevel):
+    """Muestra la imagen frontal; se arrastra un rectangulo sobre la zona donde va la parte."""
+    MAXW, MAXH = 520, 560
+
+    def __init__(self, master, front_path, part, initial=None):
+        super().__init__(master)
+        self.title(f"Zona de «{part}»")
+        self.configure(bg=PANEL)
+        self.resizable(False, False)
+        self.result = None
+        self.rect = None
+        self.rect_id = None
+        img = Image.open(front_path).convert("RGBA")
+        sc = min(self.MAXW / img.width, self.MAXH / img.height)
+        self.cw, self.ch = max(int(img.width * sc), 1), max(int(img.height * sc), 1)
+        bg = Image.new("RGBA", (self.cw, self.ch), INNER)
+        bg.alpha_composite(img.resize((self.cw, self.ch)))
+        self.photo = ImageTk.PhotoImage(bg.convert("RGB"))
+
+        tk.Label(self, bg=PANEL, fg=TEXT, font=(FONT, 10), wraplength=self.cw,
+                 text=f"Marca de forma aproximada dónde está «{part}» en la imagen frontal. Se afina comparando las fotos."
+                 ).pack(padx=16, pady=(14, 8))
+        self.canvas = tk.Canvas(self, width=self.cw, height=self.ch, bg=INNER,
+                                highlightthickness=1, highlightbackground=LINE, cursor="crosshair")
+        self.canvas.pack(padx=16)
+        self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
+        if initial:
+            x0, y0, x1, y1 = initial
+            self.rect = (x0 * self.cw, y0 * self.ch, x1 * self.cw, y1 * self.ch)
+            self.redraw()
+        self.canvas.bind("<ButtonPress-1>", self.press)
+        self.canvas.bind("<B1-Motion>", self.drag)
+
+        row = tk.Frame(self, bg=PANEL)
+        row.pack(pady=12)
+        flat_button(row, "Cancelar", self.destroy).pack(side="left", padx=6)
+        self.ok_btn = flat_button(row, "Aceptar", self.accept)
+        self.ok_btn.pack(side="left", padx=6)
+        self.update_ok()
+        self.transient(master)
+        self.grab_set()
+        self.wait_window()
+
+    def _clamp(self, e):
+        return min(max(e.x, 0), self.cw), min(max(e.y, 0), self.ch)
+
+    def press(self, e):
+        x, y = self._clamp(e)
+        self.rect = (x, y, x, y)
+        self.redraw()
+
+    def drag(self, e):
+        x, y = self._clamp(e)
+        self.rect = (self.rect[0], self.rect[1], x, y)
+        self.redraw()
+
+    def redraw(self):
+        if self.rect_id is not None:
+            self.canvas.delete(self.rect_id)
+        x0, y0, x1, y1 = self.rect
+        self.rect_id = self.canvas.create_rectangle(x0, y0, x1, y1, outline=AMBER, width=2, dash=(6, 3))
+        self.update_ok()
+
+    def update_ok(self):
+        ok = (self.rect is not None and abs(self.rect[2] - self.rect[0]) >= 8
+              and abs(self.rect[3] - self.rect[1]) >= 8)
+        self.ok_btn.config(state="normal" if ok else "disabled")
+
+    def accept(self):
+        x0, y0, x1, y1 = self.rect
+        self.result = [min(x0, x1) / self.cw, min(y0, y1) / self.ch,
+                       max(x0, x1) / self.cw, max(y0, y1) / self.ch]
+        self.destroy()
+
+
+class PartSlot(Slot):
+    """Bloque de una parte a detallar: carpeta detalles/<nombre>/ con una imagen y su zona."""
+    def __init__(self, master, part, on_change, on_remove, on_region):
+        self.part, self.on_remove, self.on_region = part, on_remove, on_region
+        super().__init__(master, f"detalles/{part}", part.replace("_", " ").upper(),
+                         "Parte", on_change)
+
+    def draw(self):
+        super().draw()
+        if self.has_image():  # ⌖ verde = zona marcada, ambar = falta marcarla
+            ok = read_region(self.part) is not None
+            self.create_text(self.W - 52, 24, text="⌖", fill=GREEN if ok else AMBER,
+                             font=(FONT, 13, "bold"))
+
+    def click(self, e):
+        if e.y < 46 and self.has_image():
+            if e.x > self.W - 44:
+                return self.remove()
+            if e.x > self.W - 70:
+                return self.on_region(self.part)
+        self.choose()
+
+    def remove(self):  # la ✕ borra la parte entera, no solo la imagen
+        shutil.rmtree(self.folder, ignore_errors=True)
+        self.on_remove()
 
 
 class Segmented(tk.Canvas):
@@ -265,8 +382,13 @@ class Steps(tk.Canvas):
                          highlightthickness=0)
         self.w, self.actions = width, actions
         self.states = ["disabled"] * 4
+        self.next = None
         self.bind("<Button-1>", self.click)
         self.bind("<Motion>", self.motion)
+        self.draw()
+
+    def set_next(self, i):
+        self.next = i
         self.draw()
 
     def set_states(self, states):
@@ -287,7 +409,8 @@ class Steps(tk.Canvas):
             self.create_oval(8, mid - 6, 20, mid + 6, fill=MUTED if dim else acc, outline="")
             # tarjeta
             rrect(self, 40, top, self.w - 2, top + self.CH, 14,
-                  fill="#181b25" if dim else bg, outline=LINE if dim else bd, width=1)
+                  fill="#181b25" if dim else bg, outline=LINE if dim else bd,
+                  width=2 if (i == self.next and not dim) else 1)
             rrect(self, 52, top + 15, 88, top + 51, 9,
                   fill="#222736" if dim else lerp_color(bg, acc, 0.22), outline="")
             self.create_text(70, mid, text=STEP_ICON[i], font=(FONT, 15),
@@ -302,6 +425,9 @@ class Steps(tk.Canvas):
             elif st == "running":
                 self.create_text(self.w - 14, top + 22, text="en curso…", anchor="e",
                                  font=(FONT, 8), fill=acc)
+            elif i == self.next and st == "enabled":
+                self.create_text(self.w - 14, top + 22, text="siguiente ▸", anchor="e",
+                                 font=(FONT, 8, "bold"), fill=acc)
 
     def _index(self, y):
         i = int(y // self.ROW)
@@ -318,6 +444,110 @@ class Steps(tk.Canvas):
         self.config(cursor="hand2" if ok else "")
 
 
+class DetailPanel(tk.Frame):
+    """Panel del paso 2: partes del modelo a detallar (cara, manos, ropa...)."""
+    def __init__(self, master, on_change, on_apply, on_back):
+        super().__init__(master, bg=PANEL)
+        self.on_change = on_change
+        top = tk.Frame(self, bg=PANEL)
+        top.pack(fill="x", pady=(0, 6))
+        tk.Label(top, text="Partes a detallar", bg=PANEL, fg=MUTED,
+                 font=(FONT, 12)).pack(side="left")
+        flat_button(top, "← Volver a las vistas", on_back).pack(side="right")
+        self.add_btn = flat_button(top, "+ Añadir parte", self.add)
+        self.add_btn.pack(side="right", padx=8)
+        flat_button(top, "Detallar ▶", on_apply).pack(side="right")
+        tk.Label(self, bg=PANEL, fg=MUTED, font=(FONT, 9), justify="left", wraplength=740,
+                 text="Añade una imagen por cada parte (cara, manos, ropa…) y marca de forma aproximada "
+                      "dónde va en la vista frontal (icono ⌖ de cada bloque). El programa compara las fotos "
+                      "para ubicarla con exactitud, genera su malla 3D y el modelo del paso 1 adopta su relieve."
+                 ).pack(anchor="w", pady=(0, 6))
+        row = tk.Frame(self, bg=PANEL)
+        row.pack(fill="x", pady=(0, 6))
+        tk.Label(row, text="Intensidad del relieve", bg=PANEL, fg=MUTED,
+                 font=(FONT, 10)).pack(side="left", padx=(0, 12))
+        self.strength = tk.StringVar(value="normal")
+        Segmented(row, self.strength, [("suave", "Suave"), ("normal", "Normal"), ("fuerte", "Fuerte")],
+                  lambda: None, width=290).pack(side="left")
+        self.grid_frame = tk.Frame(self, bg=PANEL, width=750, height=2 * (Slot.H + 10))
+        self.grid_frame.pack()
+        self.grid_frame.grid_propagate(False)
+        self.reload()
+
+    def names(self):
+        DETAIL_DIR.mkdir(exist_ok=True)
+        return [d.name for d in sorted(DETAIL_DIR.iterdir()) if d.is_dir() and first_image(d)]
+
+    def count(self):
+        return len(self.names())
+
+    def reload(self):
+        for w in self.grid_frame.winfo_children():
+            w.destroy()
+        names = self.names()
+        if not names:
+            tk.Label(self.grid_frame, bg=PANEL, fg=MUTED, font=(FONT, 11),
+                     text="Aún no hay partes.\nPulsa «+ Añadir parte» y elige su imagen."
+                     ).grid(row=0, column=0, padx=40, pady=60)
+        for i, n in enumerate(names):
+            s = PartSlot(self.grid_frame, n, self.on_change, self.removed, self.edit_region)
+            s.config(bg=PANEL)
+            s.grid(row=i // 3, column=i % 3, padx=5, pady=5)
+        self.add_btn.config(state="normal" if len(names) < MAX_PARTS else "disabled")
+
+    def removed(self):
+        self.after(10, lambda: (self.reload(), self.on_change()))
+
+    def missing_regions(self):
+        return [n for n in self.names() if read_region(n) is None]
+
+    def ask_region(self, part, initial=None):
+        front = first_image(BASE / "front")
+        if front is None:
+            messagebox.showinfo("Falta la imagen frontal",
+                                "Carga primero la imagen FRONTAL en el panel de vistas: "
+                                "se usa para marcar dónde va cada parte.")
+            return None
+        return RegionDialog(self.winfo_toplevel(), front, part, initial).result
+
+    def save_region(self, part, rect):
+        (DETAIL_DIR / part).mkdir(parents=True, exist_ok=True)
+        (DETAIL_DIR / part / "region.json").write_text(json.dumps({"rect": rect}), encoding="utf-8")
+
+    def edit_region(self, part):
+        rect = self.ask_region(part, read_region(part))
+        if rect:
+            self.save_region(part, rect)
+            self.after(10, lambda: (self.reload(), self.on_change()))
+
+    def add(self):
+        if first_image(BASE / "front") is None:
+            messagebox.showinfo("Falta la imagen frontal",
+                                "Carga primero la imagen FRONTAL en el panel de vistas.")
+            return
+        name = simpledialog.askstring("Nueva parte", "¿Qué parte es? (cara, mano izquierda, ropa…)\nEl nombre ayuda a localizarla en el modelo.", parent=self)
+        name = re.sub(r"\W+", "_", (name or "").strip().lower()).strip("_")
+        if not name:
+            return
+        folder = DETAIL_DIR / name
+        if folder.exists() and first_image(folder):
+            messagebox.showinfo("Parte existente", f"Ya hay una parte llamada «{name}».")
+            return
+        path = filedialog.askopenfilename(
+            title=f"Imagen de: {name}",
+            filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.webp"), ("Todos", "*.*")])
+        if not path:
+            return
+        rect = self.ask_region(name)
+        if rect is None:  # cancelado: no se crea nada
+            return
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copy(path, folder / Path(path).name)
+        self.save_region(name, rect)
+        self.reload()
+        self.on_change()
+
+
 # ---------------------------------------------------------------- ventana
 class App(tk.Tk):
     def __init__(self):
@@ -325,10 +555,13 @@ class App(tk.Tk):
         self.title("img2blend")
         self.configure(bg=BG)
         self.resizable(False, False)
+        # pantallas bajas: bloques mas pequenos para que la consola quede visible
+        Slot.H = 180 if self.winfo_screenheight() < 900 else 215
         self.q = queue.Queue()
         self.running = False
         self.current_step = None
         self.console_open = True
+        self.mode = "views"
 
         shell = tk.Frame(self, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
         shell.pack(padx=14, pady=14)
@@ -347,6 +580,9 @@ class App(tk.Tk):
         self.open_btn.pack(side="right", padx=8)
         self.retouch_btn = flat_button(head, "Retocar pintura en Blender", self.retouch)
         self.retouch_btn.pack(side="right")
+        self.delete_btn = flat_button(head, "Borrar modelo 3D", self.delete_model)
+        self.delete_btn.config(fg="#ff8a8a")
+        self.delete_btn.pack(side="right", padx=(0, 8))
         tk.Frame(shell, bg=LINE, height=1).pack(fill="x")
 
         # ---- cuerpo
@@ -355,9 +591,15 @@ class App(tk.Tk):
 
         left = tk.Frame(body, bg=PANEL)
         left.pack(side="left", padx=(22, 10), pady=16)
-        tk.Label(left, text="Imágenes del modelo", bg=PANEL, fg=MUTED,
+        self.stage = tk.Frame(left, bg=PANEL, width=760, height=2 * (Slot.H + 10) + 150)
+        self.stage.pack()
+        self.stage.pack_propagate(False)
+
+        # panel 1: las 6 vistas del modelo
+        self.views_panel = tk.Frame(self.stage, bg=PANEL)
+        tk.Label(self.views_panel, text="Imágenes del modelo", bg=PANEL, fg=MUTED,
                  font=(FONT, 12)).pack(anchor="w", pady=(0, 10))
-        grid = tk.Frame(left, bg=PANEL)
+        grid = tk.Frame(self.views_panel, bg=PANEL)
         grid.pack()
         self.slots = []
         for i, (key, title, note) in enumerate(SLOTS):
@@ -365,6 +607,10 @@ class App(tk.Tk):
             s.config(bg=PANEL)
             s.grid(row=i // 3, column=i % 3, padx=5, pady=5)
             self.slots.append(s)
+
+        # panel 2: partes a detallar
+        self.detail_panel = DetailPanel(self.stage, self.update_status,
+                                        self.apply_detail, lambda: self.show_mode("views"))
 
         tk.Frame(body, bg=LINE, width=1).pack(side="left", fill="y", pady=0)
 
@@ -400,22 +646,36 @@ class App(tk.Tk):
 
         self.console_wrap = tk.Frame(shell, bg=INNER)
         self.console_wrap.pack(fill="x")
-        self.log = tk.Text(self.console_wrap, height=6, width=120, bg=INNER, fg="#cfd3dd",
+        self.log = tk.Text(self.console_wrap, height=7, width=120, bg=INNER, fg="#cfd3dd",
                            relief="flat", font=("Consolas", 9), state="disabled",
                            padx=22, pady=8, insertbackground=TEXT, bd=0, highlightthickness=0)
         self.log.pack(fill="x")
         self.log.tag_configure("ok", foreground=GREEN)
         self.log.tag_configure("err", foreground="#ff6b6b")
 
-        self.update_status()
+        self.show_mode("views")
+        self.steps.set_next(None if (BASE / "output" / "modelo.blend").exists() else 0)
+        self.after(50, self.place_window)
         self.after(100, self.poll)
 
     # ------------------------------------------------------------ estado
+    def show_mode(self, mode):
+        """Alterna entre el panel de vistas y el de partes a detallar."""
+        self.mode = mode
+        self.views_panel.pack_forget()
+        self.detail_panel.pack_forget()
+        (self.views_panel if mode == "views" else self.detail_panel).pack(anchor="nw")
+        self.update_status()
+
     def update_status(self):
         n = sum(1 for s in self.slots if s.has_image())
         front_ok = bool(self.slots) and self.slots[0].has_image()
-        self.pill.set(f"{n}/6 imágenes cargadas" if front_ok
-                      else f"{n}/6 imágenes · falta la frontal", front_ok)
+        if self.mode == "detail":
+            c = self.detail_panel.count()
+            self.pill.set(f"{c}/{MAX_PARTS} partes para detallar", c > 0)
+        else:
+            self.pill.set(f"{n}/6 imágenes cargadas" if front_ok
+                          else f"{n}/6 imágenes · falta la frontal", front_ok)
 
         out = BASE / "output"
         has_model = (out / "modelo.blend").exists()
@@ -436,6 +696,8 @@ class App(tk.Tk):
             st(3, has_model),
         ])
         self.retouch_btn.config(state="normal" if has_paint and idle else "disabled")
+        has_any = any(t.exists() for t in self.model_files())
+        self.delete_btn.config(state="normal" if has_any and idle else "disabled")
 
     def write_log(self, text, tag=None):
         self.log.config(state="normal")
@@ -510,12 +772,31 @@ class App(tk.Tk):
     def generate(self):
         q = self.quality.get()
         if self.precheck(q):
+            self.show_mode("views")
             self.run_job("pipeline.py", ["--quality", q], step=0)
 
     def detail(self):
-        self.run_job("detallar.py", step=1)
+        """Clic en el paso 2: primero muestra el panel de partes; despues lanza Blender."""
+        if self.mode != "detail":
+            self.show_mode("detail")
+        else:
+            self.apply_detail()
+
+    def apply_detail(self):
+        if self.detail_panel.count() == 0:
+            messagebox.showinfo("Detallar", "Añade al menos una parte con su imagen.")
+            return
+        missing = self.detail_panel.missing_regions()
+        if missing:
+            messagebox.showinfo("Detallar", "Marca la zona (icono ⌖) de: " + ", ".join(missing))
+            return
+        q = self.quality.get()
+        if self.precheck(q):
+            self.run_job("detallar.py", ["--quality", q, "--fuerza",
+                                         str(STRENGTH[self.detail_panel.strength.get()])], step=1)
 
     def paint(self):
+        self.show_mode("views")
         self.run_job("pintar.py", step=2)
 
     def export(self):
@@ -534,6 +815,90 @@ class App(tk.Tk):
             messagebox.showerror("Blender", str(e))
             return
         subprocess.Popen([blender, str(painted), "--python", str(BASE / "blender_retocar.py")])
+
+    def model_files(self):
+        """Todo lo que genera el modelo 3D (NO incluye tus imagenes ni las partes a detallar)."""
+        out = BASE / "output"
+        names = ["modelo.blend", "modelo_pintado.blend", "modelo_pintado_anterior.blend",
+                 "modelo_antes_de_detallar.blend", "textura.png", "raw_mesh.glb",
+                 "_detallado_estado.json", "_pintura", "_detalle", "_photos", "colmap"]
+        files = [out / n for n in names]
+        if out.exists():
+            files += list(out.glob("*.blend1"))   # copias automaticas de Blender
+        return files
+
+    def delete_model(self):
+        """Borra el modelo 3D generado para empezar de nuevo (el usuario no quedo conforme)."""
+        existing = [t for t in self.model_files() if t.exists()]
+        if not existing:
+            messagebox.showinfo("Borrar modelo 3D", "No hay ningún modelo generado.")
+            return
+        ok = messagebox.askyesno(
+            "Borrar modelo 3D",
+            "Se borrará el modelo 3D generado, con su versión pintada, la textura, las copias de "
+            "seguridad y los archivos temporales.\n\n"
+            "NO se borran tus imágenes de las vistas, las partes a detallar ni lo que hayas "
+            "exportado.\n\nEsta acción no se puede deshacer. ¿Borrar el modelo?",
+            icon="warning", default="no")
+        if not ok:
+            return
+        errors = []
+        for t in existing:
+            try:
+                if t.is_dir():
+                    shutil.rmtree(t)
+                else:
+                    t.unlink()
+            except Exception as e:
+                errors.append(f"{t.name}: {e}")
+        self.show_mode("views")
+        self.steps.set_next(0)
+        self.log.config(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.config(state="disabled")
+        if errors:
+            self.write_log("\n● No se pudo borrar todo:\n" + "\n".join(errors) +
+                           "\nCierra Blender si tiene el modelo abierto y vuelve a intentarlo.\n", "err")
+        else:
+            self.write_log("\n● Modelo 3D borrado. Pulsa «Generar modelo 3D» para crear uno nuevo.\n", "ok")
+
+    def place_window(self):
+        """Centra la ventana sin dejar que se salga por abajo (la consola debe verse)."""
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = max((self.winfo_screenwidth() - w) // 2, 0)
+        y = max((self.winfo_screenheight() - h) // 2 - 30, 0)
+        self.geometry(f"+{x}+{y}")
+
+    def view_in_blender(self, path):
+        """Abre Blender (ventana normal) para mostrar el resultado de un paso."""
+        try:
+            blender = find_blender("blender")
+            subprocess.Popen([blender, str(path), "--python", str(BASE / "blender_ver.py")],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except SystemExit as e:        # find_blender no encontro Blender
+            self.write_log(f"\n{e}\n", "err")
+        except Exception as e:
+            self.write_log(f"\nNo pude abrir Blender: {e}\n", "err")
+
+    def after_step(self, step):
+        """Al terminar bien un paso: pasa al siguiente y, en los pasos 1 y 2, muestra el resultado."""
+        if step == 0:
+            self.show_mode("detail")
+            self.steps.set_next(1)
+            self.write_log("\n● Paso 1 listo: se abre Blender para que veas el modelo. "
+                           "Ahora añade las partes a detallar (paso 2).\n", "ok")
+            self.view_in_blender(BASE / "output" / "modelo.blend")
+        elif step == 1:                # detallar.py ya abre Blender con el resultado
+            self.show_mode("views")
+            self.steps.set_next(2)
+            self.write_log("\n● Paso 2 listo: Blender se abre con el resultado. "
+                           "Siguiente: pintar con tus imágenes (paso 3).\n", "ok")
+        elif step == 2:
+            self.steps.set_next(3)
+        elif step == 3:
+            self.steps.set_next(None)
 
     # ------------------------------------------------------------ procesos
     def run_job(self, script, args=None, step=None):
@@ -569,6 +934,7 @@ class App(tk.Tk):
             while True:
                 item = self.q.get_nowait()
                 if isinstance(item, tuple):
+                    step = self.current_step
                     self.running = False
                     self.current_step = None
                     ok = item[1] == 0
@@ -577,6 +943,8 @@ class App(tk.Tk):
                     else:
                         self.write_log(f"\n● El proceso terminó con error (código {item[1]}).", "err")
                     self.update_status()
+                    if ok:
+                        self.after_step(step)
                 else:
                     self.write_log(item)
         except queue.Empty:

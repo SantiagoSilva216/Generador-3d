@@ -1,21 +1,54 @@
 IMG2BLEND
 =========
-1. Coloca UNA imagen en cada carpeta:
+1. Coloca UNA imagen en cada carpeta (o usa la interfaz: interfaz.bat):
      front/  -> vista frontal
      left/   -> vista izquierda
      back/   -> vista trasera
      right/  -> vista derecha
+     top/ y bottom/ -> opcionales, solo se usan al pintar
    (minimo obligatorio: front. Cuantas mas vistas, mejor.)
    Consejo: mismo encuadre y distancia, fondo liso.
 
 2. Instala los requisitos (una vez):
      - Blender (https://www.blender.org)
      - Python 3.10+ y el repo Hunyuan3D-2 (pip install -e .), requiere GPU NVIDIA
+       (instalar.bat lo hace todo, incluido OpenCV y transformers)
      - Para fotogrametria (20+ fotos): COLMAP en el PATH
 
 3. Ejecuta desde esta carpeta:
-     python pipeline.py
+     python pipeline.py        (o doble clic en interfaz.bat)
    En Windows, si Blender no esta en el PATH:
      python pipeline.py --blender "C:/Program Files/Blender Foundation/Blender 4.2/blender.exe"
 
 4. El resultado queda en output/modelo.blend
+
+PASOS DE LA INTERFAZ
+====================
+1 Generar modelo 3D        -> output/modelo.blend
+2 Detallar                 -> partes (cara, manos...) con su imagen y su zona marcada en la
+                              vista frontal. Se ubican comparando fotos (SIFT / plantilla /
+                              CLIP con el nombre), se estima su profundidad y el modelo adopta
+                              su relieve. Copia del modelo original: modelo_antes_de_detallar.blend
+3 Pintar con mis imagenes  -> output/modelo_pintado.blend (repetirlo despues de detallar)
+4 Exportar                 -> FBX / GLB / OBJ
+
+"Borrar modelo 3D" (cabecera) elimina el modelo generado para empezar de nuevo; no toca tus
+imagenes ni las partes a detallar.
+
+Descargas la primera vez que se usan: Hunyuan3D (varios GB), CLIP (~600 MB) y
+Depth Anything V2 small (~100 MB).
+
+ARCHIVOS
+========
+interfaz.py / interfaz.bat      interfaz grafica
+pipeline.py                     genera el modelo (Hunyuan3D + Blender)
+detallar.py                     paso 2: orquesta el detallado
+alinear.py                      ubica cada parte comparando fotos (SIFT, plantilla, CLIP)
+profundidad.py                  mapa de profundidad de cada foto (Depth Anything V2)
+blender_aplicar_detalle.py      Blender: adapta el modelo al relieve de cada parte
+blender_detallar.py             Blender: abre el modelo en escultura con las partes de referencia
+pintar.py / blender_paint.py    paso 3
+exportar.py / blender_export.py paso 4
+blender_cleanup.py              limpia y escala la malla generada
+blender_retocar.py              abre la pintura para retocarla a mano
+ajustes.py                      VRAM, bateria y que el equipo no se suspenda
