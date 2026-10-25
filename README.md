@@ -1,6 +1,1 @@
-<<<<<<< HEAD
-# img2blend
-
-=======
-# Generador-3d
->>>>>>> origin/main
+Generador de modelo 3d por imagenes
